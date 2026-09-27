@@ -1,7 +1,7 @@
 // VozPDF — lector de PDFs con voz en español. PWA, funciona sin internet.
 import * as pdfjsLib from "./vendor/pdf.min.mjs";
 
-pdfjsLib.GlobalWorkerOptions.workerSrc = "./vendor/pdf.worker.min.mjs";
+pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("./vendor/pdf.worker.min.mjs", import.meta.url).toString();
 
 const $ = (id) => document.getElementById(id);
 const loadingEl = $("loading");
