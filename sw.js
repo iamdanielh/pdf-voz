@@ -3,7 +3,7 @@ const CACHE = "vozpdf-v1";
 const ASSETS = [
   "./",
   "index.html",
-  "css/style.css?v=1",
+  "css/style.css?v=2",
   "js/app.js?v=1",
   "js/vendor/pdf.min.mjs",
   "js/vendor/pdf.worker.min.mjs",

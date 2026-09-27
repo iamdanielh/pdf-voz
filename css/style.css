@@ -159,6 +159,7 @@ body {
 }
 
 /* ---------- loading ---------- */
+.loading[hidden] { display: none !important; }
 .loading {
   position: fixed; inset: 0; z-index: 100;
   background: var(--bg); color: var(--ink);
