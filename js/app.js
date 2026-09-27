@@ -90,7 +90,10 @@ function esVoices() {
 function pickVoice() {
   const vs = esVoices();
   if (!vs.length) return null;
-  return vs.find((v) => v.voiceURI === settings.voiceURI) || vs[0];
+  const saved = vs.find((v) => v.voiceURI === settings.voiceURI);
+  if (saved) return saved;
+  // Prefiere la voz predeterminada del iPhone (p. ej. Carlos) sobre la primera de la lista.
+  return vs.find((v) => v.default) || vs[0];
 }
 function refreshVoiceList() {
   const sel = $("voice-select");
@@ -104,7 +107,7 @@ function refreshVoiceList() {
   vs.forEach((v) => {
     const o = document.createElement("option");
     o.value = v.voiceURI;
-    o.textContent = `${v.name} (${v.lang})`;
+    o.textContent = `${v.name} (${v.lang})${v.default ? " — predeterminada" : ""}`;
     sel.appendChild(o);
   });
   const pv = pickVoice();
