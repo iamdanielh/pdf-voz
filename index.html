@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1d4ed8">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="VozPDF">
+<title>VozPDF — Tus PDFs con voz en español</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="stylesheet" href="css/style.css?v=1">
+</head>
+<body>
+<div id="app">
+  <!-- ============ BIBLIOTECA ============ -->
+  <section id="view-library" class="view">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">🔊</span>
+        <div>
+          <h1>VozPDF</h1>
+          <p>Tus PDFs leídos en voz alta, en español</p>
+        </div>
+      </div>
+    </header>
+    <main id="pdf-list" class="pdf-list"></main>
+    <div id="library-empty" class="empty hidden">
+      <div class="empty-icon">📄</div>
+      <p>Aún no tienes PDFs.<br>Toca <b>+</b> para añadir uno desde tus archivos.</p>
+      <p class="empty-note">Se guardan en tu iPhone y funcionan sin internet.</p>
+    </div>
+    <button id="btn-add" class="fab" aria-label="Añadir PDF">+</button>
+    <input type="file" id="file-input" accept=".pdf,application/pdf" hidden>
+  </section>
+
+  <!-- ============ LECTOR ============ -->
+  <section id="view-reader" class="view hidden">
+    <header class="topbar reader-bar">
+      <button id="btn-back" class="icon-btn" aria-label="Volver">‹</button>
+      <div class="reader-title">
+        <h2 id="doc-title">Documento</h2>
+        <p id="page-indicator">Página 1 de 1</p>
+      </div>
+      <button id="btn-settings" class="icon-btn" aria-label="Ajustes de voz">⚙</button>
+    </header>
+
+    <main id="reader-scroll" class="reader-scroll">
+      <div id="page-wrap" class="page-wrap">
+        <canvas id="page-canvas"></canvas>
+      </div>
+      <div id="no-text" class="no-text hidden">
+        Esta página parece ser una imagen escaneada: no tiene texto para leer en voz alta.
+      </div>
+      <div id="sentences" class="sentences"></div>
+      <div class="reader-bottom-space"></div>
+    </main>
+
+    <footer class="transport">
+      <input type="range" id="page-slider" min="1" max="1" value="1" step="1" aria-label="Ir a la página">
+      <div class="transport-row">
+        <button id="btn-prev" class="tbtn" aria-label="Página anterior">⏮</button>
+        <button id="btn-play" class="tbtn primary" aria-label="Leer o pausar">▶</button>
+        <button id="btn-stop" class="tbtn" aria-label="Detener">⏹</button>
+        <button id="btn-next" class="tbtn" aria-label="Página siguiente">⏭</button>
+      </div>
+      <p id="read-status" class="read-status">Toca ▶ para escuchar esta página</p>
+    </footer>
+  </section>
+
+  <!-- ============ AJUSTES ============ -->
+  <div id="settings-sheet" class="sheet hidden">
+    <div class="sheet-card">
+      <h3>Voz en español</h3>
+      <label class="field">
+        <span>Voz</span>
+        <select id="voice-select"></select>
+      </label>
+      <p id="voice-note" class="hint hidden">No se encontró una voz en español en este iPhone. Ve a Ajustes → Accesibilidad → Contenido hablado → Voces para descargar una.</p>
+      <label class="field">
+        <span>Velocidad: <b id="rate-val">1.0×</b></span>
+        <input type="range" id="rate-slider" min="0.6" max="1.4" step="0.1" value="1">
+      </label>
+      <label class="check">
+        <input type="checkbox" id="continue-next" checked>
+        <span>Seguir leyendo en la página siguiente al terminar</span>
+      </label>
+      <button id="btn-close-settings" class="primary-btn">Listo</button>
+    </div>
+  </div>
+
+  <div id="loading" class="loading" hidden>Cargando…</div>
+</div>
+<script type="module" src="js/app.js?v=1"></script>
+<script>
+// Watchdog: si el módulo no arranca en 15 s, ofrece limpiar caché y recargar.
+setTimeout(function () {
+  if (window.__VOZPDF_BOOTED__) return;
+  var l = document.getElementById("loading");
+  if (!l) return;
+  l.hidden = false;
+  l.innerHTML = "";
+  var p = document.createElement("p");
+  p.textContent = "La app no pudo iniciarse (posible caché antigua).";
+  var b = document.createElement("button");
+  b.textContent = "Borrar caché y recargar";
+  b.className = "primary-btn";
+  b.addEventListener("click", async function () {
+    try {
+      if ("serviceWorker" in navigator) {
+        var regs = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(regs.map(function (r) { return r.unregister(); }));
+      }
+      if ("caches" in window) {
+        var keys = await caches.keys();
+        await Promise.all(keys.map(function (k) { return caches.delete(k); }));
+      }
+    } catch (e) {}
+    location.reload();
+  });
+  l.appendChild(p); l.appendChild(b);
+}, 15000);
+</script>
+</body>
+</html>
