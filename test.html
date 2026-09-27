@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="es">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VozPDF autotest</title>
+<style>body{font-family:sans-serif;padding:16px}#log{white-space:pre-wrap;background:#f0f0f0;padding:12px;border-radius:8px}canvas{border:1px solid #ccc;max-width:100%}.sent{margin:6px 0;padding:8px;background:#fff;border:1px solid #ddd;border-radius:8px}</style>
+</head>
+<body>
+<h1>VozPDF autotest</h1>
+<div id="log">iniciando…</div>
+<canvas id="c"></canvas>
+<div id="sents"></div>
+<script type="module">
+import * as pdfjsLib from "./js/vendor/pdf.min.mjs";
+const log = (m) => { document.getElementById("log").textContent += "\n" + m; };
+try {
+  pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("./js/vendor/pdf.worker.min.mjs", import.meta.url).toString();
+  log("workerSrc = " + pdfjsLib.GlobalWorkerOptions.workerSrc);
+  const buf = await (await fetch("test-assets/prueba.pdf")).arrayBuffer();
+  log("PDF descargado: " + buf.byteLength + " bytes");
+  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  log("getDocument OK — páginas: " + pdf.numPages);
+  const page = await pdf.getPage(1);
+  const vp = page.getViewport({ scale: 1.5 });
+  const canvas = document.getElementById("c");
+  canvas.width = vp.width; canvas.height = vp.height;
+  await page.render({ canvasContext: canvas.getContext("2d"), viewport: vp }).promise;
+  log("render página 1 OK (" + vp.width + "x" + vp.height + ")");
+  const tc = await page.getTextContent();
+  let line = "", lines = [];
+  tc.items.forEach((it) => { line += it.str + " "; if (it.hasEOL) { lines.push(line); line = ""; } });
+  if (line.trim()) lines.push(line);
+  const text = lines.join(" ").replace(/\s+/g, " ").trim();
+  log("texto extraído (" + text.length + " chars): " + text.slice(0, 90));
+  const sents = text.match(/[^.!?…]+[.!?…]+["'»”)]?/g) || [];
+  const box = document.getElementById("sents");
+  sents.forEach((s) => { const d = document.createElement("div"); d.className = "sent"; d.textContent = s.trim(); box.appendChild(d); });
+  log(sents.length >= 4 ? "AUTOTEST: PASS" : "AUTOTEST: FAIL (pocas frases)");
+} catch (e) {
+  log("AUTOTEST: FAIL — " + (e && e.message));
+}
+</script>
+</body>
+</html>
