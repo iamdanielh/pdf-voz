@@ -92,8 +92,13 @@ function pickVoice() {
   if (!vs.length) return null;
   const saved = vs.find((v) => v.voiceURI === settings.voiceURI);
   if (saved) return saved;
-  // Prefiere la voz predeterminada del iPhone (p. ej. Carlos) sobre la primera de la lista.
-  return vs.find((v) => v.default) || vs[0];
+  const isEnhanced = (v) => /mejorada|enhanced|premium/i.test(v.name || "");
+  // 1) predeterminada del iPhone si es mejorada, 2) predeterminada,
+  // 3) cualquier voz mejorada en español, 4) la primera disponible.
+  return vs.find((v) => v.default && isEnhanced(v))
+      || vs.find((v) => v.default)
+      || vs.find(isEnhanced)
+      || vs[0];
 }
 function refreshVoiceList() {
   const sel = $("voice-select");
@@ -392,6 +397,11 @@ $("continue-next").addEventListener("change", (ev) => {
 /* ================= Arranque ================= */
 (async function init() {
   refreshVoiceList();
+  // Fija la voz elegida automáticamente para que no cambie si iOS reordena la lista.
+  if (!settings.voiceURI) {
+    const pv = pickVoice();
+    if (pv) { settings.voiceURI = pv.voiceURI; saveSettings(); refreshVoiceList(); }
+  }
   await renderLibrary();
   if ("serviceWorker" in navigator) {
     try { await navigator.serviceWorker.register("sw.js"); } catch (e) {}

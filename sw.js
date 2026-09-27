@@ -4,7 +4,7 @@ const ASSETS = [
   "./",
   "index.html",
   "css/style.css?v=2",
-  "js/app.js?v=3",
+  "js/app.js?v=4",
   "js/vendor/pdf.min.mjs",
   "js/vendor/pdf.worker.min.mjs",
   "manifest.webmanifest",
