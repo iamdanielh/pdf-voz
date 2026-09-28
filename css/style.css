@@ -157,6 +157,11 @@ body {
   width: 100%; padding: 14px; border: none; border-radius: 14px;
   background: var(--accent); color: #fff; font-size: 17px; font-weight: 600; cursor: pointer;
 }
+.secondary-btn {
+  width: 100%; padding: 12px; border: 1px solid var(--line); border-radius: 14px;
+  background: var(--bg); color: var(--ink); font-size: 16px; font-weight: 600; cursor: pointer;
+  margin: -8px 0 16px;
+}
 
 /* ---------- loading ---------- */
 .loading[hidden] { display: none !important; }

@@ -141,10 +141,11 @@ function stopKeepalive() {
   try { if (keepaliveAudio) keepaliveAudio.pause(); } catch (e) {}
 }
 
+function allVoices() {
+  try { return synth.getVoices() || []; } catch (e) { return []; }
+}
 function esVoices() {
-  try {
-    return synth.getVoices().filter((v) => (v.lang || "").toLowerCase().startsWith("es"));
-  } catch (e) { return []; }
+  return allVoices().filter((v) => (v.lang || "").toLowerCase().startsWith("es"));
 }
 function pickVoice() {
   const vs = esVoices();
@@ -161,23 +162,59 @@ function pickVoice() {
 }
 function refreshVoiceList() {
   const sel = $("voice-select");
-  const vs = esVoices();
+  const es = esVoices();
+  // Si iOS no expone ninguna voz en español, muestra todas las que haya
+  // para diagnosticar (antes la lista quedaba vacía sin explicación).
+  const vs = es.length ? es : allVoices();
   sel.innerHTML = "";
+  const note = $("voice-note");
+  const count = $("voice-count");
+  if (count) count.textContent = vs.length
+    ? `${vs.length} ${vs.length === 1 ? "voz disponible" : "voces disponibles"}${es.length ? "" : " (ninguna en español)"}`
+    : "Buscando voces…";
   if (!vs.length) {
-    $("voice-note").classList.remove("hidden");
+    note.textContent = "El iPhone no está entregando voces a la app. Cierra VozPDF por completo y vuelve a abrirla; si acabas de descargar voces, iOS a veces tarda en exponerlas.";
+    note.classList.remove("hidden");
     return;
   }
-  $("voice-note").classList.add("hidden");
+  if (!es.length) {
+    note.textContent = "iOS no está exponiendo voces en español a la app. Estas son todas las disponibles. Prueba cerrar y reabrir la app.";
+    note.classList.remove("hidden");
+  } else {
+    note.classList.add("hidden");
+  }
   vs.forEach((v) => {
     const o = document.createElement("option");
     o.value = v.voiceURI;
     o.textContent = `${v.name} (${v.lang})${v.default ? " — predeterminada" : ""}`;
     sel.appendChild(o);
   });
+  // Fija la voz elegida automáticamente para que no cambie si iOS reordena la lista.
+  if (!settings.voiceURI) {
+    const auto = pickVoice();
+    if (auto) { settings.voiceURI = auto.voiceURI; saveSettings(); }
+  }
   const pv = pickVoice();
   if (pv) sel.value = pv.voiceURI;
 }
-if ("onvoiceschanged" in synth) synth.onvoiceschanged = refreshVoiceList;
+if ("onvoiceschanged" in synth) synth.onvoiceschanged = () => ensureVoicesLoaded();
+// iOS entrega las voces de forma asíncrona y el evento voiceschanged a veces
+// se dispara antes de que este módulo cargue: sondear hasta que aparezcan.
+let voicePoll = null;
+function ensureVoicesLoaded(force) {
+  refreshVoiceList();
+  if (allVoices().length && !force) return;
+  if (voicePoll) {
+    if (!force) return;
+    clearInterval(voicePoll);
+    voicePoll = null;
+  }
+  let tries = 0;
+  voicePoll = setInterval(() => {
+    refreshVoiceList();
+    if (allVoices().length || ++tries >= 20) { clearInterval(voicePoll); voicePoll = null; }
+  }, 500);
+}
 
 function clearHighlight() {
   document.querySelectorAll(".sentence.speaking").forEach((el) => el.classList.remove("speaking"));
@@ -461,7 +498,7 @@ $("page-slider").addEventListener("change", (ev) => renderPage(parseInt(ev.targe
 
 /* ================= Ajustes ================= */
 $("btn-settings").addEventListener("click", () => {
-  refreshVoiceList();
+  ensureVoicesLoaded(true);
   $("rate-slider").value = settings.rate;
   $("rate-val").textContent = Number(settings.rate).toFixed(1) + "×";
   $("continue-next").checked = settings.continueNext;
@@ -474,6 +511,7 @@ $("voice-select").addEventListener("change", (ev) => {
   settings.voiceURI = ev.target.value;
   saveSettings();
 });
+$("btn-reload-voices").addEventListener("click", () => ensureVoicesLoaded(true));
 $("rate-slider").addEventListener("input", (ev) => {
   settings.rate = parseFloat(ev.target.value);
   $("rate-val").textContent = settings.rate.toFixed(1) + "×";
@@ -485,12 +523,7 @@ $("continue-next").addEventListener("change", (ev) => {
 });
 /* ================= Arranque ================= */
 (async function init() {
-  refreshVoiceList();
-  // Fija la voz elegida automáticamente para que no cambie si iOS reordena la lista.
-  if (!settings.voiceURI) {
-    const pv = pickVoice();
-    if (pv) { settings.voiceURI = pv.voiceURI; saveSettings(); refreshVoiceList(); }
-  }
+  ensureVoicesLoaded();
   await renderLibrary();
   if ("serviceWorker" in navigator) {
     try { await navigator.serviceWorker.register("sw.js"); } catch (e) {}

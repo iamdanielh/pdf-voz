@@ -11,7 +11,7 @@
 <title>VozPDF — Tus PDFs con voz en español</title>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon-180.png">
-<link rel="stylesheet" href="css/style.css?v=2">
+<link rel="stylesheet" href="css/style.css?v=3">
 </head>
 <body>
 <div id="app">
@@ -78,7 +78,9 @@
         <span>Voz</span>
         <select id="voice-select"></select>
       </label>
-      <p id="voice-note" class="hint hidden">No se encontró una voz en español en este iPhone. Ve a Ajustes → Accesibilidad → Contenido hablado → Voces para descargar una.</p>
+      <p id="voice-note" class="hint hidden">No se encontró una voz en español en este iPhone. Ve a Ajustes → Accesibilidad → Contenido hablado → Voces para descargar una, luego cierra y reabre la app.</p>
+      <p id="voice-count" class="hint"></p>
+      <button id="btn-reload-voices" class="secondary-btn">↻ Recargar voces</button>
       <label class="field">
         <span>Velocidad: <b id="rate-val">1.0×</b></span>
         <input type="range" id="rate-slider" min="0.6" max="1.4" step="0.1" value="1">
@@ -93,7 +95,7 @@
 
   <div id="loading" class="loading" hidden>Cargando…</div>
 </div>
-<script type="module" src="js/app.js?v=5"></script>
+<script type="module" src="js/app.js?v=6"></script>
 <script>
 // Watchdog: si el módulo no arranca en 15 s, ofrece limpiar caché y recargar.
 setTimeout(function () {
