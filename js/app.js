@@ -74,6 +74,10 @@ function chunkSentences(sentences, startIdx = 0, maxLen = 170) {
 
 /* ================= Voz (Web Speech API) ================= */
 const synth = window.speechSynthesis;
+// iOS se queda con la voz del dispositivo (ruta probada en el iPhone de
+// Daniel); Android/escritorio prefieren la voz web (ver abajo).
+const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+  (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 const tts = {
   chunks: [],
   pos: 0,
@@ -87,7 +91,51 @@ const tts = {
 // quedan obsoletos y ya no pueden adelantar la posición (saltos aleatorios).
 function bumpGen() {
   tts.gen++;
+  stopWebAudio();
   try { synth.cancel(); } catch (e) {}
+}
+
+/* ============ Voz web (Google TTS) para Android/escritorio ============ */
+// En Android, speechSynthesis falla en silencio con frecuencia: el teléfono
+// no trae motor TTS o no trae la voz en español, y cada enunciado dispara
+// onerror — la app "lee" la página entera sin que suene nada. La voz web
+// (MP3 de Google reproducido con <audio>) suena en cualquier teléfono con
+// internet, sin depender del TTS del dispositivo. Si no hay red, se cae
+// automáticamente a la voz del dispositivo.
+let webAudio = null;
+let webVoiceDead = false; // si falla una vez, no reintentar en esta lectura
+function stopWebAudio() {
+  try { if (webAudio) { webAudio.pause(); webAudio.src = ""; } } catch (e) {}
+  webAudio = null;
+}
+function webTtsUrl(text) {
+  return "https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=es&q=" +
+    encodeURIComponent(String(text).slice(0, 200));
+}
+// Reproduce un trozo con la voz web. cbs: { onstart, onend, onfail }.
+function playWebChunk(text, guardMs, cbs) {
+  const audio = new Audio();
+  let settled = false;
+  const done = (ok) => {
+    if (settled) return;
+    settled = true;
+    if (ok) { webAudio = audio; }
+    else { try { audio.pause(); audio.src = ""; } catch (e) {} }
+    (ok ? cbs.onstart : cbs.onfail)();
+  };
+  try { audio.playbackRate = settings.rate || 1; } catch (e) {}
+  // Mantiene vivo al perro guardián mientras el audio suena.
+  audio.ontimeupdate = () => { tts.lastActivity = Date.now(); };
+  audio.onplaying = () => done(true);
+  audio.onended = () => { webAudio = null; cbs.onend(); };
+  audio.onerror = () => done(false);
+  try {
+    audio.src = webTtsUrl(text);
+    audio.load();
+    const p = audio.play();
+    if (p && p.catch) p.catch(() => done(false));
+  } catch (e) { done(false); }
+  setTimeout(() => done(false), guardMs);
 }
 
 /* ============ Mantener la pantalla encendida y el audio vivo ============ */
@@ -238,13 +286,41 @@ function speakChunk() {
   // Sin synth.cancel() aquí: el enunciado anterior ya terminó. Cancelar y
   // hablar de inmediato hace que iOS trague enunciados o dispare onend
   // tardíos que saltaban párrafos al azar.
+  stopWebAudio(); // por si el perro guardián re-dispara un trozo atascado
   const g = tts.gen;
+  highlightChunk(chunk);
+  setStatus(`Leyendo… (${tts.pos + 1}/${tts.chunks.length})`);
+  tts.lastActivity = Date.now();
+  const advance = () => {
+    if (!tts.playing || tts.gen !== g) return; // trozo viejo: ignorar
+    tts.pos++;
+    tts.lastActivity = Date.now();
+    speakChunk();
+  };
+  // Fuera de iOS: primero la voz web (confiable en Android); si no hay red
+  // o el endpoint falla, se cae a la voz del dispositivo.
+  if (!IS_IOS && !webVoiceDead) {
+    playWebChunk(chunk.text, 3500, {
+      onstart: () => { if (tts.gen !== g || !tts.playing) stopWebAudio(); },
+      onend: advance,
+      onfail: () => {
+        webVoiceDead = true; // no reintentar la voz web en esta lectura
+        if (!tts.playing || tts.gen !== g) return;
+        speakLocal(chunk, g, advance);
+      },
+    });
+    return;
+  }
+  speakLocal(chunk, g, advance);
+}
+// Voz del dispositivo (Web Speech API): ruta principal en iOS, respaldo
+// en Android/escritorio cuando no hay red.
+function speakLocal(chunk, g, advance) {
   const u = new SpeechSynthesisUtterance(chunk.text);
   const v = pickVoice();
   if (v) u.voice = v;
   u.lang = (v && v.lang) || "es-ES";
   u.rate = settings.rate || 1;
-  tts.lastActivity = Date.now();
   const startedAt = Date.now();
   u.onend = () => {
     if (!tts.playing || tts.gen !== g) return; // enunciado viejo: ignorar
@@ -257,18 +333,13 @@ function speakChunk() {
       return;
     }
     tts.fastRetries = 0;
-    tts.pos++;
-    tts.lastActivity = Date.now();
-    speakChunk();
+    advance();
   };
   u.onerror = () => {
     if (!tts.playing || tts.gen !== g) return; // enunciado viejo: ignorar
     tts.fastRetries = 0;
-    tts.pos++;
-    speakChunk();
+    advance();
   };
-  highlightChunk(chunk);
-  setStatus(`Leyendo… (${tts.pos + 1}/${tts.chunks.length})`);
   try { synth.speak(u); } catch (e) { finishReading(); }
 }
 // Perro guardián: iOS a veces deja la voz colgada en silencio.
@@ -286,6 +357,7 @@ function startReading(fromSentence = 0) {
   tts.chunks = chunkSentences(pageSentences, fromSentence);
   tts.pos = 0;
   tts.fastRetries = 0;
+  webVoiceDead = false; // reintentar la voz web en cada lectura nueva
   tts.playing = true;
   setPlayIcon(true);
   acquireWakeLock();
