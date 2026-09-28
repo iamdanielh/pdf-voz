@@ -80,7 +80,66 @@ const tts = {
   playing: false,
   lastActivity: 0,
   onPageEnd: null,
+  gen: 0,          // generación: los enunciados de una generación vieja se ignoran
+  fastRetries: 0,
 };
+// Sube la generación y cancela la voz: los manejadores de enunciados viejos
+// quedan obsoletos y ya no pueden adelantar la posición (saltos aleatorios).
+function bumpGen() {
+  tts.gen++;
+  try { synth.cancel(); } catch (e) {}
+}
+
+/* ============ Mantener la pantalla encendida y el audio vivo ============ */
+// iOS apaga speechSynthesis cuando la pantalla se bloquea. Dos defensas:
+// 1) Wake Lock: pide que la pantalla no se apague mientras lee.
+// 2) Audio silencioso en bucle: mantiene viva la sesión de audio de Safari
+//    para que la voz siga aunque la pantalla se bloquee igual.
+let wakeLock = null;
+async function acquireWakeLock() {
+  try {
+    if (!("wakeLock" in navigator)) return;
+    if (wakeLock) return;
+    wakeLock = await navigator.wakeLock.request("screen");
+    wakeLock.addEventListener("release", () => { wakeLock = null; });
+  } catch (e) { wakeLock = null; }
+}
+function releaseWakeLock() {
+  try { if (wakeLock) wakeLock.release(); } catch (e) {}
+  wakeLock = null;
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && tts.playing) acquireWakeLock();
+});
+
+let keepaliveAudio = null;
+function silentWavUrl() {
+  const rate = 8000, n = rate; // 1 s de silencio, 8 bits mono
+  const buf = new ArrayBuffer(44 + n);
+  const dv = new DataView(buf);
+  const wstr = (o, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
+  wstr(0, "RIFF"); dv.setUint32(4, 36 + n, true); wstr(8, "WAVE");
+  wstr(12, "fmt "); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true);
+  dv.setUint16(22, 1, true); dv.setUint32(24, rate, true);
+  dv.setUint32(28, rate, true); dv.setUint16(32, 1, true); dv.setUint16(34, 8, true);
+  wstr(36, "data"); dv.setUint32(40, n, true);
+  for (let i = 0; i < n; i++) dv.setUint8(44 + i, 128);
+  return URL.createObjectURL(new Blob([buf], { type: "audio/wav" }));
+}
+function startKeepalive() {
+  try {
+    if (!keepaliveAudio) {
+      keepaliveAudio = new Audio(silentWavUrl());
+      keepaliveAudio.loop = true;
+      keepaliveAudio.setAttribute("playsinline", "");
+    }
+    const p = keepaliveAudio.play();
+    if (p && p.catch) p.catch(() => {});
+  } catch (e) {}
+}
+function stopKeepalive() {
+  try { if (keepaliveAudio) keepaliveAudio.pause(); } catch (e) {}
+}
 
 function esVoices() {
   try {
@@ -139,21 +198,35 @@ function setPlayIcon(playing) { $("btn-play").textContent = playing ? "⏸" : "�
 function speakChunk() {
   const chunk = tts.chunks[tts.pos];
   if (!chunk) { finishReading(); return; }
-  try { synth.cancel(); } catch (e) {}
+  // Sin synth.cancel() aquí: el enunciado anterior ya terminó. Cancelar y
+  // hablar de inmediato hace que iOS trague enunciados o dispare onend
+  // tardíos que saltaban párrafos al azar.
+  const g = tts.gen;
   const u = new SpeechSynthesisUtterance(chunk.text);
   const v = pickVoice();
   if (v) u.voice = v;
   u.lang = (v && v.lang) || "es-ES";
   u.rate = settings.rate || 1;
   tts.lastActivity = Date.now();
+  const startedAt = Date.now();
   u.onend = () => {
-    if (!tts.playing) return;
+    if (!tts.playing || tts.gen !== g) return; // enunciado viejo: ignorar
+    // iOS a veces "termina" un enunciado al instante sin hablarlo: reintentar
+    // el mismo trozo en vez de saltarlo.
+    if (Date.now() - startedAt < 300 && tts.fastRetries < 3) {
+      tts.fastRetries++;
+      tts.lastActivity = Date.now();
+      speakChunk();
+      return;
+    }
+    tts.fastRetries = 0;
     tts.pos++;
     tts.lastActivity = Date.now();
     speakChunk();
   };
   u.onerror = () => {
-    if (!tts.playing) return;
+    if (!tts.playing || tts.gen !== g) return; // enunciado viejo: ignorar
+    tts.fastRetries = 0;
     tts.pos++;
     speakChunk();
   };
@@ -172,16 +245,21 @@ setInterval(() => {
 
 function startReading(fromSentence = 0) {
   if (!pageSentences.length) return;
-  try { synth.cancel(); } catch (e) {}
+  bumpGen();
   tts.chunks = chunkSentences(pageSentences, fromSentence);
   tts.pos = 0;
+  tts.fastRetries = 0;
   tts.playing = true;
   setPlayIcon(true);
+  acquireWakeLock();
+  startKeepalive();
   speakChunk();
 }
 function pauseReading() {
   tts.playing = false;
-  try { synth.cancel(); } catch (e) {}
+  bumpGen();
+  releaseWakeLock();
+  stopKeepalive();
   setPlayIcon(false);
   setStatus("En pausa — toca ▶ para seguir");
 }
@@ -189,21 +267,27 @@ function resumeReading() {
   if (!tts.chunks.length || tts.pos >= tts.chunks.length) { startReading(0); return; }
   tts.playing = true;
   setPlayIcon(true);
+  acquireWakeLock();
+  startKeepalive();
   speakChunk();
 }
 function finishReading() {
   tts.playing = false;
-  try { synth.cancel(); } catch (e) {}
+  bumpGen();
   setPlayIcon(false);
   clearHighlight();
   // Al terminar la página, seguir con la siguiente si está activado.
   if (settings.continueNext && curPage < numPages && pdfDoc) {
     setStatus("Pasando a la página siguiente…");
     renderPage(curPage + 1).then(() => startReading(0)).catch(() => {
+      releaseWakeLock();
+      stopKeepalive();
       setStatus("Toca ▶ para escuchar esta página");
     });
     return;
   }
+  releaseWakeLock();
+  stopKeepalive();
   setStatus("Toca ▶ para escuchar esta página");
 }
 $("btn-play").addEventListener("click", () => {
@@ -297,8 +381,11 @@ async function openDoc(id) {
   if (!doc) { alert("No se encontró el PDF."); return; }
   loadingEl.hidden = false;
   loadingEl.textContent = "Abriendo PDF…";
-  try { synth.cancel(); } catch (e) {}
-  tts.playing = false; tts.chunks = []; tts.pos = 0;
+  tts.playing = false;
+  bumpGen();
+  releaseWakeLock();
+  stopKeepalive();
+  tts.chunks = []; tts.pos = 0;
   try {
     if (pdfDoc) { try { await pdfDoc.destroy(); } catch (e) {} }
     pdfDoc = await pdfjsLib.getDocument({ data: doc.data.slice(0) }).promise;
@@ -315,7 +402,9 @@ async function openDoc(id) {
 }
 $("btn-back").addEventListener("click", async () => {
   tts.playing = false;
-  try { synth.cancel(); } catch (e) {}
+  bumpGen();
+  releaseWakeLock();
+  stopKeepalive();
   setPlayIcon(false);
   if (pdfDoc) { try { await pdfDoc.destroy(); } catch (e) {} pdfDoc = null; }
   showView("library");
@@ -326,7 +415,7 @@ async function renderPage(n) {
   n = Math.max(1, Math.min(numPages, n));
   curPage = n;
   tts.playing = false;
-  try { synth.cancel(); } catch (e) {}
+  bumpGen();
   tts.chunks = []; tts.pos = 0;
   setPlayIcon(false);
   clearHighlight();
