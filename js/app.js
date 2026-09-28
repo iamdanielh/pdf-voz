@@ -115,6 +115,9 @@ function webTtsUrl(text) {
 // Reproduce un trozo con la voz web. cbs: { onstart, onend, onfail }.
 function playWebChunk(text, guardMs, cbs) {
   const audio = new Audio();
+  // Google 404s translate_tts when the request carries our Referer
+  // (hotlink protection). no-referrer gets the MP3 back.
+  audio.setAttribute("referrerpolicy", "no-referrer");
   let settled = false;
   const done = (ok) => {
     if (settled) return;
