@@ -31,7 +31,7 @@ const dbDeletePdf = (id) => dbOp("readwrite", (s) => s.delete(id));
 
 /* ================= Ajustes ================= */
 const settings = Object.assign(
-  { voiceURI: "", rate: 1, continueNext: true },
+  { voiceURI: "", voiceManual: false, rate: 1, continueNext: true },
   JSON.parse(localStorage.getItem("vozpdf-settings") || "{}")
 );
 function saveSettings() {
@@ -192,6 +192,7 @@ function stopKeepalive() {
   try { if (keepaliveAudio) keepaliveAudio.pause(); } catch (e) {}
 }
 
+const AUTO_VOICE = "__auto__";
 function allVoices() {
   try { return synth.getVoices() || []; } catch (e) { return []; }
 }
@@ -201,10 +202,21 @@ function esVoices() {
 function pickVoice() {
   const vs = esVoices();
   if (!vs.length) return null;
-  const saved = vs.find((v) => v.voiceURI === settings.voiceURI);
-  if (saved) return saved;
+  // Solo se respeta la voz guardada si el usuario la eligió a mano en la app.
+  // Una elección automática nunca se guarda, así que el valor viejo no puede
+  // congelar la lectura en un "primer uso" viejo.
+  if (settings.voiceManual) {
+    const saved = vs.find((v) => v.voiceURI === settings.voiceURI);
+    if (saved) return saved;
+  }
   const isEnhanced = (v) => /mejorada|enhanced|premium/i.test(v.name || "");
-  // 1) predeterminada del iPhone si es mejorada, 2) predeterminada,
+  // En iOS, lo correcto es NO fijar u.voice: el sistema ya expone la voz
+  // elegida en Ajustes → Accesibilidad → Contenido hablado → Voces como la
+  // predeterminada del idioma, y asignar cualquier voz de getVoices() la pisa
+  // (puede salir una voz "asset" mediocre aunque haya una mejor instalada).
+  // Mismo criterio que la app de la Biblia. Solo fuera de iOS elegimos nosotros.
+  if (IS_IOS) return null;
+  // 1) predeterminada si es mejorada, 2) predeterminada,
   // 3) cualquier voz mejorada en español, 4) la primera disponible.
   return vs.find((v) => v.default && isEnhanced(v))
       || vs.find((v) => v.default)
@@ -234,19 +246,25 @@ function refreshVoiceList() {
   } else {
     note.classList.add("hidden");
   }
+  const autoOpt = document.createElement("option");
+  autoOpt.value = AUTO_VOICE;
+  sel.appendChild(autoOpt);
   vs.forEach((v) => {
     const o = document.createElement("option");
     o.value = v.voiceURI;
     o.textContent = `${v.name} (${v.lang})${v.default ? " — predeterminada" : ""}`;
     sel.appendChild(o);
   });
-  // Fija la voz elegida automáticamente para que no cambie si iOS reordena la lista.
-  if (!settings.voiceURI) {
-    const auto = pickVoice();
-    if (auto) { settings.voiceURI = auto.voiceURI; saveSettings(); }
-  }
   const pv = pickVoice();
-  if (pv) sel.value = pv.voiceURI;
+  // La etiqueta de "Automático" muestra a qué voz resuelve ahora mismo, para
+  // ver cuál está mandando sin tener que abrir los Ajustes del iPhone.
+  autoOpt.textContent = pv
+    ? `↺ Automático: ${pv.name} (${pv.lang})`
+    : "↺ Automático: predeterminada del iPhone";
+  // Con elección manual la selección no salta aunque iOS reordene la lista.
+  // Si la voz guardada ya no existe, se vuelve a automático.
+  const manual = settings.voiceManual && vs.some((v) => v.voiceURI === settings.voiceURI);
+  sel.value = manual ? settings.voiceURI : AUTO_VOICE;
 }
 if ("onvoiceschanged" in synth) synth.onvoiceschanged = () => ensureVoicesLoaded();
 // iOS entrega las voces de forma asíncrona y el evento voiceschanged a veces
@@ -583,8 +601,16 @@ $("btn-close-settings").addEventListener("click", () => {
   $("settings-sheet").classList.add("hidden");
 });
 $("voice-select").addEventListener("change", (ev) => {
-  settings.voiceURI = ev.target.value;
+  if (ev.target.value === AUTO_VOICE) {
+    // Volver a automático: borrar el pin para que la app vuelva a seguir a iOS.
+    settings.voiceManual = false;
+    settings.voiceURI = "";
+  } else {
+    settings.voiceManual = true;
+    settings.voiceURI = ev.target.value;
+  }
   saveSettings();
+  refreshVoiceList(); // repinta la etiqueta de "Automático" y fija la selección
 });
 $("btn-reload-voices").addEventListener("click", () => ensureVoicesLoaded(true));
 $("rate-slider").addEventListener("input", (ev) => {
