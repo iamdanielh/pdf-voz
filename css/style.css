@@ -7,6 +7,8 @@
   --accent-soft: #dbeafe;
   --line: #e5e7eb;
   --danger: #dc2626;
+  --word: #fde047;
+  --word-ink: #141824;
   --radius: 16px;
 }
 @media (prefers-color-scheme: dark) {
@@ -18,6 +20,8 @@
     --accent: #60a5fa;
     --accent-soft: #1e3a8a;
     --line: #2b3650;
+    --word: #facc15;
+    --word-ink: #0f1420;
   }
 }
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -109,6 +113,15 @@ body {
   background: var(--accent-soft);
   border-color: var(--accent);
   box-shadow: 0 0 0 1px var(--accent);
+}
+/* Palabra que se está leyendo ahora mismo. El amarillón contrasta con el azul
+   de la frase y con el texto, así que se distingue de un vistazo sin depender
+   del color. */
+.sentence .w { border-radius: 4px; }
+.sentence .w.karaoke {
+  background: var(--word);
+  color: var(--word-ink);
+  box-shadow: 0 0 0 2px var(--word);
 }
 .reader-bottom-space { height: 12px; }
 

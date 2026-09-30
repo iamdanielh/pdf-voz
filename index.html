@@ -8,10 +8,10 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="VozPDF">
-<title>VozPDF — Tus PDFs con voz en español</title>
+<title>VozPDF — Lee PDF, EPUB, DOCX y texto en voz alta</title>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon-180.png">
-<link rel="stylesheet" href="css/style.css?v=3">
+<link rel="stylesheet" href="css/style.css?v=4">
 </head>
 <body>
 <div id="app">
@@ -22,18 +22,18 @@
         <span class="brand-mark">🔊</span>
         <div>
           <h1>VozPDF</h1>
-          <p>Tus PDFs leídos en voz alta, en español</p>
+          <p>PDF, EPUB, DOCX y texto leídos en voz alta, en español</p>
         </div>
       </div>
     </header>
     <main id="pdf-list" class="pdf-list"></main>
     <div id="library-empty" class="empty hidden">
       <div class="empty-icon">📄</div>
-      <p>Aún no tienes PDFs.<br>Toca <b>+</b> para añadir uno desde tus archivos.</p>
+      <p>Aún no tienes documentos.<br>Toca <b>+</b> para añadir uno desde tus archivos.</p>
       <p class="empty-note">Se guardan en tu iPhone y funcionan sin internet.</p>
     </div>
-    <button id="btn-add" class="fab" aria-label="Añadir PDF">+</button>
-    <input type="file" id="file-input" accept=".pdf,application/pdf" hidden>
+    <button id="btn-add" class="fab" aria-label="Añadir documento">+</button>
+    <input type="file" id="file-input" accept=".pdf,.epub,.docx,.txt,.md,application/pdf,application/epub+zip,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown" hidden>
   </section>
 
   <!-- ============ LECTOR ============ -->
@@ -52,19 +52,19 @@
         <canvas id="page-canvas"></canvas>
       </div>
       <div id="no-text" class="no-text hidden">
-        Esta página parece ser una imagen escaneada: no tiene texto para leer en voz alta.
+        Esta sección parece ser una imagen escaneada: no tiene texto para leer en voz alta.
       </div>
       <div id="sentences" class="sentences"></div>
       <div class="reader-bottom-space"></div>
     </main>
 
     <footer class="transport">
-      <input type="range" id="page-slider" min="1" max="1" value="1" step="1" aria-label="Ir a la página">
+      <input type="range" id="page-slider" min="1" max="1" value="1" step="1" aria-label="Ir a la sección">
       <div class="transport-row">
-        <button id="btn-prev" class="tbtn" aria-label="Página anterior">⏮</button>
+        <button id="btn-prev" class="tbtn" aria-label="Sección anterior">⏮</button>
         <button id="btn-play" class="tbtn primary" aria-label="Leer o pausar">▶</button>
         <button id="btn-stop" class="tbtn" aria-label="Detener">⏹</button>
-        <button id="btn-next" class="tbtn" aria-label="Página siguiente">⏭</button>
+        <button id="btn-next" class="tbtn" aria-label="Sección siguiente">⏭</button>
       </div>
       <p id="read-status" class="read-status">Toca ▶ para escuchar esta página</p>
     </footer>
@@ -87,7 +87,7 @@
       </label>
       <label class="check">
         <input type="checkbox" id="continue-next" checked>
-        <span>Seguir leyendo en la página siguiente al terminar</span>
+        <span>Seguir leyendo en la sección siguiente al terminar</span>
       </label>
       <button id="btn-close-settings" class="primary-btn">Listo</button>
     </div>
@@ -95,7 +95,7 @@
 
   <div id="loading" class="loading" hidden>Cargando…</div>
 </div>
-<script type="module" src="js/app.js?v=9"></script>
+<script type="module" src="js/app.js?v=10"></script>
 <script>
 // Watchdog: si el módulo no arranca en 15 s, ofrece limpiar caché y recargar.
 setTimeout(function () {

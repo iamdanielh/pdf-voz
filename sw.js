@@ -1,10 +1,13 @@
-// VozPDF service worker — app shell offline. PDFs live in IndexedDB.
-const CACHE = "vozpdf-v4";
+// VozPDF service worker — app shell offline. Los documentos viven en IndexedDB.
+const CACHE = "vozpdf-v5";
 const ASSETS = [
   "./",
   "index.html",
-  "css/style.css?v=3",
-  "js/app.js?v=9",
+  "css/style.css?v=4",
+  "js/app.js?v=10",
+  "js/importers.js",
+  "js/karaoke.js",
+  "js/reader-text.js",
   "js/vendor/pdf.min.mjs",
   "js/vendor/pdf.worker.min.mjs",
   "manifest.webmanifest",

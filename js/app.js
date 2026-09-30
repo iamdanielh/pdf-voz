@@ -1,5 +1,8 @@
-// VozPDF — lector de PDFs con voz en español. PWA, funciona sin internet.
+// VozPDF — lector de PDF, EPUB, DOCX y texto con voz en español. PWA, sin internet.
 import * as pdfjsLib from "./vendor/pdf.min.mjs";
+import { importFile, fmtLabel } from "./importers.js";
+import { splitSentences, chunkSentences } from "./reader-text.js";
+import { cumulative, wordAt, estimateMs, calibrate, wordMs, wordIndexMap } from "./karaoke.js";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("./vendor/pdf.worker.min.mjs", import.meta.url).toString();
 
@@ -7,6 +10,8 @@ const $ = (id) => document.getElementById(id);
 const loadingEl = $("loading");
 
 /* ================= IndexedDB ================= */
+// El store se llama "pdfs" desde el principio; no se renombra para no perder
+// las bibliotecas ya guardadas.
 const DB_NAME = "vozpdf-db";
 function idb() {
   return new Promise((resolve, reject) => {
@@ -28,6 +33,7 @@ const dbAddPdf = (doc) => dbOp("readwrite", (s) => s.add(doc));
 const dbListPdfs = () => dbOp("readonly", (s) => s.getAll()).then((r) => r || []);
 const dbGetPdf = (id) => dbOp("readonly", (s) => s.get(id));
 const dbDeletePdf = (id) => dbOp("readwrite", (s) => s.delete(id));
+const dbPutPdf = (doc) => dbOp("readwrite", (s) => s.put(doc));
 
 /* ================= Ajustes ================= */
 const settings = Object.assign(
@@ -38,39 +44,19 @@ function saveSettings() {
   localStorage.setItem("vozpdf-settings", JSON.stringify(settings));
 }
 
+/* ================= Unidades de lectura ================= */
+// Cada formato tiene su propia palabra: PDF son páginas, EPUB capítulos y el
+// resto secciones. Todo lo que antes hablaba de "página" pasa a hablar de la
+// unidad que corresponda.
+function unitWord(fmt, plural) {
+  if (fmt === "pdf") return plural ? "páginas" : "página";
+  if (fmt === "epub") return plural ? "capítulos" : "capítulo";
+  return plural ? "secciones" : "sección";
+}
+const FMT_ICON = { pdf: "📄", epub: "📚", docx: "📝", txt: "📃", md: "📃" };
+
 /* ================= Texto: frases y trozos ================= */
-function splitSentences(text) {
-  const clean = String(text || "").replace(/\s+/g, " ").trim();
-  if (!clean) return [];
-  const out = [];
-  const re = /[^.!?…]+[.!?…]+["'»”)}\]]?/g;
-  let m, last = 0;
-  while ((m = re.exec(clean)) !== null) {
-    const s = m[0].trim();
-    if (s.length > 1) out.push(s);
-    last = re.lastIndex;
-    if (out.length > 2000) break;
-  }
-  const rest = clean.slice(last).trim();
-  if (rest.length > 1) out.push(rest);
-  return out;
-}
-// Agrupa frases en trozos cortos: iOS corta los enunciados largos.
-function chunkSentences(sentences, startIdx = 0, maxLen = 170) {
-  const chunks = [];
-  let cur = { text: "", idx: [] };
-  for (let i = startIdx; i < sentences.length; i++) {
-    const s = sentences[i];
-    if (cur.text && (cur.text + " " + s).length > maxLen) {
-      chunks.push(cur);
-      cur = { text: "", idx: [] };
-    }
-    cur.text = cur.text ? cur.text + " " + s : s;
-    cur.idx.push(i);
-  }
-  if (cur.text) chunks.push(cur);
-  return chunks;
-}
+// Ahora viven en reader-text.js (puras y probadas aparte).
 
 /* ================= Voz (Web Speech API) ================= */
 const synth = window.speechSynthesis;
@@ -86,6 +72,8 @@ const tts = {
   onPageEnd: null,
   gen: 0,          // generación: los enunciados de una generación vieja se ignoran
   fastRetries: 0,
+  chunkStartMs: 0, // cuándo empezó el trozo en curso (para calibrar el karaoke)
+  chunkEstMs: 0,   // duración estimada del trozo en curso
 };
 // Sube la generación y cancela la voz: los manejadores de enunciados viejos
 // quedan obsoletos y ya no pueden adelantar la posición (saltos aleatorios).
@@ -301,6 +289,84 @@ function highlightChunk(chunk) {
 function setStatus(t) { $("read-status").textContent = t; }
 function setPlayIcon(playing) { $("btn-play").textContent = playing ? "⏸" : "▶"; }
 
+/* ================= Karaoke: palabra que se está leyendo ================= */
+// Dos motores, mismo aspecto:
+//  · voz web: el <audio> tiene línea de tiempo real, así que las palabras se
+//    reparten sobre audio.currentTime. Es exacto, no deriva.
+//  · voz del dispositivo (iOS): speechSynthesis no emite eventos de palabra,
+//    así que se estima por longitud y se calibra con la duración real medida
+//    del trozo anterior. Mismo truco que la app de la Biblia.
+let karaokeTimer = null;
+let karaokeWord = -1;
+let calFactor = 1;   // factor de calibración del dispositivo
+
+function clearKaraoke() {
+  if (karaokeTimer) { clearTimeout(karaokeTimer); karaokeTimer = null; }
+  const w = karaokeWord >= 0 ? allWords[karaokeWord] : null;
+  if (w) w.classList.remove("karaoke");
+  karaokeWord = -1;
+}
+function setKaraokeWord(words, wi) {
+  if (wi === karaokeWord) return;
+  const prev = karaokeWord >= 0 ? allWords[karaokeWord] : null;
+  if (prev) prev.classList.remove("karaoke");
+  karaokeWord = wi;
+  const w = words[wi];
+  if (w) {
+    w.classList.add("karaoke");
+    if (w.scrollIntoView) w.scrollIntoView({ block: "nearest" });
+  }
+}
+// Palabras del trozo actual, en el orden en que se leen.
+function wordsForChunk(chunk) {
+  if (!chunk || !chunk.idx || !chunk.idx.length) return [];
+  const first = sentWordStart[chunk.idx[0]];
+  const lastS = chunk.idx[chunk.idx.length - 1];
+  const end = sentWordStart[lastS] + sentWordCount[lastS];
+  if (!(first >= 0) || !(end > first)) return [];
+  return allWords.slice(first, end);
+}
+// Motor 1: anclado al audio real.
+function startKaraokeAudio(chunk) {
+  clearKaraoke();
+  const words = wordsForChunk(chunk);
+  if (!words.length) return;
+  const cum = cumulative(words.map((w) => w.textContent || ""));
+  const g = tts.gen;
+  const tick = () => {
+    if (!tts.playing || g !== tts.gen) return;
+    const a = webAudio;
+    if (!a || !(a.duration > 0) || !isFinite(a.duration)) {
+      karaokeTimer = setTimeout(tick, 100);   // aún no hay duración
+      return;
+    }
+    setKaraokeWord(words, wordAt(cum, a.currentTime / a.duration));
+    karaokeTimer = setTimeout(tick, 55);
+  };
+  // Se mira casi de inmediato: si aún no hay duración, el propio bucle espera.
+  karaokeTimer = setTimeout(tick, 40);
+}
+// Motor 2: estimación con calibración previa.
+function startKaraokeTimer(chunk) {
+  clearKaraoke();
+  const words = wordsForChunk(chunk);
+  if (!words.length) return;
+  const texts = words.map((w) => w.textContent || "");
+  const g = tts.gen;
+  const rate = settings.rate || 1;
+  const cal = Math.max(calFactor, 0.25);
+  tts.chunkEstMs = estimateMs(texts, rate, cal);
+  tts.chunkStartMs = Date.now();
+  const tick = (wi) => {
+    if (!tts.playing || g !== tts.gen) return;
+    setKaraokeWord(words, wi);
+    if (wi + 1 >= texts.length) { karaokeTimer = null; return; }
+    const wait = Math.max(20, (wordMs(texts[wi]) / rate) * cal);
+    karaokeTimer = setTimeout(() => tick(wi + 1), wait);
+  };
+  tick(0);
+}
+
 function speakChunk() {
   const chunk = tts.chunks[tts.pos];
   if (!chunk) { finishReading(); return; }
@@ -322,9 +388,13 @@ function speakChunk() {
   // o el endpoint falla, se cae a la voz del dispositivo.
   if (!IS_IOS && !webVoiceDead) {
     playWebChunk(chunk.text, 3500, {
-      onstart: () => { if (tts.gen !== g || !tts.playing) stopWebAudio(); },
-      onend: advance,
+      onstart: () => {
+        if (tts.gen !== g || !tts.playing) { stopWebAudio(); return; }
+        startKaraokeAudio(chunk);
+      },
+      onend: () => { clearKaraoke(); advance(); },
       onfail: () => {
+        clearKaraoke();
         webVoiceDead = true; // no reintentar la voz web en esta lectura
         if (!tts.playing || tts.gen !== g) return;
         speakLocal(chunk, g, advance);
@@ -343,6 +413,17 @@ function speakLocal(chunk, g, advance) {
   u.lang = (v && v.lang) || "es-ES";
   u.rate = settings.rate || 1;
   const startedAt = Date.now();
+  // El karaoke arranca con el onset real si iOS lo notifica; si no, tras un
+  // pellizco, porque speechSynthesis a veces no dispara onstart.
+  let onset = false;
+  const beginKaraoke = () => {
+    if (onset) return;
+    onset = true;
+    if (!tts.playing || tts.gen !== g) return;
+    startKaraokeTimer(chunk);
+  };
+  u.onstart = beginKaraoke;
+  setTimeout(beginKaraoke, 250);
   u.onend = () => {
     if (!tts.playing || tts.gen !== g) return; // enunciado viejo: ignorar
     // iOS a veces "termina" un enunciado al instante sin hablarlo: reintentar
@@ -350,15 +431,22 @@ function speakLocal(chunk, g, advance) {
     if (Date.now() - startedAt < 300 && tts.fastRetries < 3) {
       tts.fastRetries++;
       tts.lastActivity = Date.now();
+      clearKaraoke();
       speakChunk();
       return;
     }
     tts.fastRetries = 0;
+    // El trozo se leyó de verdad: aprovechamos para aprender el ritmo real.
+    if (onset && tts.chunkEstMs > 0) {
+      calFactor = calibrate(calFactor, Date.now() - tts.chunkStartMs, tts.chunkEstMs);
+    }
+    clearKaraoke();
     advance();
   };
   u.onerror = () => {
     if (!tts.playing || tts.gen !== g) return; // enunciado viejo: ignorar
     tts.fastRetries = 0;
+    clearKaraoke();
     advance();
   };
   try { synth.speak(u); } catch (e) { finishReading(); }
@@ -373,12 +461,14 @@ setInterval(() => {
 }, 2500);
 
 function startReading(fromSentence = 0) {
-  if (!pageSentences.length) return;
+  if (!sectionSentences.length) return;
   bumpGen();
-  tts.chunks = chunkSentences(pageSentences, fromSentence);
+  tts.chunks = chunkSentences(sectionSentences, fromSentence);
   tts.pos = 0;
   tts.fastRetries = 0;
+  tts.chunkEstMs = 0;
   webVoiceDead = false; // reintentar la voz web en cada lectura nueva
+  calFactor = 1;         // cada lectura vuelve a calibrar desde cero
   tts.playing = true;
   setPlayIcon(true);
   acquireWakeLock();
@@ -388,6 +478,7 @@ function startReading(fromSentence = 0) {
 function pauseReading() {
   tts.playing = false;
   bumpGen();
+  clearKaraoke();
   releaseWakeLock();
   stopKeepalive();
   setPlayIcon(false);
@@ -405,20 +496,21 @@ function finishReading() {
   tts.playing = false;
   bumpGen();
   setPlayIcon(false);
+  clearKaraoke();
   clearHighlight();
-  // Al terminar la página, seguir con la siguiente si está activado.
-  if (settings.continueNext && curPage < numPages && pdfDoc) {
-    setStatus("Pasando a la página siguiente…");
-    renderPage(curPage + 1).then(() => startReading(0)).catch(() => {
+  // Al terminar la sección, seguir con la siguiente si está activado.
+  if (doc && settings.continueNext && curSection < doc.sections.length - 1) {
+    setStatus(`Pasando a la ${unitWord(doc.fmt)} siguiente…`);
+    renderSection(curSection + 1).then(() => startReading(0)).catch(() => {
       releaseWakeLock();
       stopKeepalive();
-      setStatus("Toca ▶ para escuchar esta página");
+      setStatus(`Toca ▶ para escuchar esta ${unitWord(doc.fmt)}`);
     });
     return;
   }
   releaseWakeLock();
   stopKeepalive();
-  setStatus("Toca ▶ para escuchar esta página");
+  setStatus(`Toca ▶ para escuchar esta ${unitWord(doc.fmt)}`);
 }
 $("btn-play").addEventListener("click", () => {
   if (tts.playing) pauseReading();
@@ -441,31 +533,36 @@ async function renderLibrary() {
   const box = $("pdf-list");
   box.innerHTML = "";
   $("library-empty").classList.toggle("hidden", list.length > 0);
-  list.sort((a, b) => b.addedAt - a.addedAt).forEach((doc) => {
+  list.sort((a, b) => b.addedAt - a.addedAt).forEach((d) => {
     const b = document.createElement("button");
     b.className = "pdf-item";
     const meta = document.createElement("div");
     meta.className = "pdf-meta";
     const name = document.createElement("div");
     name.className = "pdf-name";
-    name.textContent = doc.name;
+    name.textContent = d.name;
+    // Los PDF antiguos aún no tienen `sections`: caemos a `pages`.
+    const fmt = d.fmt || "pdf";
+    const n = (d.sections && d.sections.length) || d.pages || 0;
     const sub = document.createElement("div");
     sub.className = "pdf-sub";
-    sub.textContent = `${doc.pages} páginas · ${fmtDate(doc.addedAt)}`;
+    sub.textContent = n
+      ? `${fmtLabel(fmt).toUpperCase()} · ${n} ${unitWord(fmt, n !== 1)} · ${fmtDate(d.addedAt)}`
+      : `${fmtLabel(fmt).toUpperCase()} · ${fmtDate(d.addedAt)}`;
     meta.appendChild(name); meta.appendChild(sub);
     const icon = document.createElement("span");
-    icon.className = "pdf-icon"; icon.textContent = "📄";
+    icon.className = "pdf-icon"; icon.textContent = FMT_ICON[fmt] || "📄";
     const del = document.createElement("button");
     del.className = "pdf-del"; del.textContent = "×"; del.setAttribute("aria-label", "Eliminar");
     del.addEventListener("click", async (ev) => {
       ev.stopPropagation();
-      if (confirm(`¿Eliminar "${doc.name}" de tu biblioteca?`)) {
-        await dbDeletePdf(doc.id).catch(() => {});
+      if (confirm(`¿Eliminar "${d.name}" de tu biblioteca?`)) {
+        await dbDeletePdf(d.id).catch(() => {});
         renderLibrary();
       }
     });
     b.appendChild(icon); b.appendChild(meta); b.appendChild(del);
-    b.addEventListener("click", () => openDoc(doc.id));
+    b.addEventListener("click", () => openDoc(d.id));
     box.appendChild(b);
   });
 }
@@ -475,57 +572,73 @@ $("file-input").addEventListener("change", async (ev) => {
   ev.target.value = "";
   if (!f) return;
   loadingEl.hidden = false;
-  loadingEl.textContent = "Añadiendo PDF…";
+  loadingEl.textContent = "Leyendo documento…";
   try {
-    const buf = await f.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({ data: buf.slice(0) }).promise;
-    await dbAddPdf({
-      name: f.name.replace(/\.pdf$/i, ""),
-      pages: pdf.numPages,
-      size: f.size,
-      data: buf,
-      addedAt: Date.now(),
-    });
-    try { await pdf.destroy(); } catch (e) {}
+    const r = await importFile(f, { pdfjsLib });
+    // Para PDF guardamos el binario original, que hace falta para el lienzo.
+    // EPUB/DOCX/TXT/MD solo necesitan el texto ya extraído.
+    const rec = r.fmt === "pdf"
+      ? { name: r.name, fmt: r.fmt, sections: r.sections, size: r.size, data: r.data, addedAt: Date.now() }
+      : { name: r.name, fmt: r.fmt, sections: r.sections, size: r.size, addedAt: Date.now() };
+    await dbAddPdf(rec);
     await renderLibrary();
   } catch (e) {
-    alert("No se pudo leer ese PDF. ¿Es un archivo PDF válido?");
+    alert(e && e.message ? e.message : "No se pudo leer ese archivo.");
   }
   loadingEl.hidden = true;
 });
 
 /* ================= Lector ================= */
-let pdfDoc = null;
+let pdfDoc = null;        // solo existe para PDF
 let docId = null;
 let docName = "";
-let numPages = 0;
-let curPage = 1;
-let pageSentences = [];
+let doc = null;           // { fmt, sections: [{ label, text }], data? }
+let curSection = 0;
+let sectionSentences = [];  // frases de la sección actual
+let allWords = [];          // <span class="w"> de la sección actual
+let sentWordStart = [];     // frase i -> primer índice en allWords
+let sentWordCount = [];     // frase i -> cuántas palabras tiene
 
 function showView(name) {
   $("view-library").classList.toggle("hidden", name !== "library");
   $("view-reader").classList.toggle("hidden", name !== "reader");
 }
 async function openDoc(id) {
-  const doc = await dbGetPdf(id).catch(() => null);
-  if (!doc) { alert("No se encontró el PDF."); return; }
+  const rec = await dbGetPdf(id).catch(() => null);
+  if (!rec) { alert("No se encontró el documento."); return; }
   loadingEl.hidden = false;
-  loadingEl.textContent = "Abriendo PDF…";
+  loadingEl.textContent = "Abriendo…";
   tts.playing = false;
   bumpGen();
   releaseWakeLock();
   stopKeepalive();
   tts.chunks = []; tts.pos = 0;
   try {
-    if (pdfDoc) { try { await pdfDoc.destroy(); } catch (e) {} }
-    pdfDoc = await pdfjsLib.getDocument({ data: doc.data.slice(0) }).promise;
-    docId = id; docName = doc.name; numPages = pdfDoc.numPages; curPage = 1;
+    // Los PDF guardados por versiones antiguas solo tienen `pages`, sin
+    // `sections`: se extrae el texto una vez y se guarda ya normalizado.
+    let d = rec;
+    if (!d.fmt) d.fmt = "pdf";
+    if (!d.sections || !d.sections.length) {
+      loadingEl.textContent = "Preparando texto…";
+      const parsed = await importFile(new File([d.data], (d.name || "libro") + ".pdf"), { pdfjsLib });
+      d = { ...d, fmt: parsed.fmt, sections: parsed.sections };
+      try { await dbPutPdf(d); } catch (e) { /* si no se guarda, igual se lee */ }
+    }
+    if (d.fmt === "pdf") {
+      if (pdfDoc) { try { await pdfDoc.destroy(); } catch (e) {} }
+      pdfDoc = await pdfjsLib.getDocument({ data: d.data.slice(0) }).promise;
+    } else if (pdfDoc) {
+      try { await pdfDoc.destroy(); } catch (e) {}
+      pdfDoc = null;
+    }
+    doc = d;
+    docId = id; docName = d.name; curSection = 0;
     $("doc-title").textContent = docName;
-    $("page-slider").max = numPages;
+    $("page-slider").max = d.sections.length;
     showView("reader");
-    await renderPage(1);
+    await renderSection(0);
   } catch (e) {
-    alert("No se pudo abrir el PDF.");
+    alert("No se pudo abrir el documento.");
     showView("library");
   }
   loadingEl.hidden = true;
@@ -536,58 +649,78 @@ $("btn-back").addEventListener("click", async () => {
   releaseWakeLock();
   stopKeepalive();
   setPlayIcon(false);
+  clearKaraoke();
   if (pdfDoc) { try { await pdfDoc.destroy(); } catch (e) {} pdfDoc = null; }
+  doc = null;
   showView("library");
   renderLibrary();
 });
 
-async function renderPage(n) {
-  n = Math.max(1, Math.min(numPages, n));
-  curPage = n;
+async function renderSection(n) {
+  if (!doc || !doc.sections.length) return;
+  n = Math.max(0, Math.min(doc.sections.length - 1, n));
+  curSection = n;
   tts.playing = false;
   bumpGen();
   tts.chunks = []; tts.pos = 0;
   setPlayIcon(false);
   clearHighlight();
-  setStatus("Toca ▶ para escuchar esta página");
-  $("page-indicator").textContent = `Página ${n} de ${numPages}`;
-  $("page-slider").value = n;
-  // Lienzo
-  const page = await pdfDoc.getPage(n);
+  clearKaraoke();
+  const u = unitWord(doc.fmt);
+  setStatus(`Toca ▶ para escuchar esta ${u}`);
+  $("page-indicator").textContent =
+    `${u[0].toUpperCase() + u.slice(1)} ${n + 1} de ${doc.sections.length}`;
+  $("page-slider").value = n + 1;
+
+  // Lienzo: solo tiene sentido en PDF. EPUB/DOCX/TXT se leen en la lista.
   const wrap = $("page-wrap");
-  const targetW = wrap.clientWidth || window.innerWidth - 24;
-  const baseVp = page.getViewport({ scale: 1 });
-  const scale = (targetW / baseVp.width) * Math.min(window.devicePixelRatio || 1, 2);
-  const vp = page.getViewport({ scale });
-  const canvas = $("page-canvas");
-  canvas.width = Math.floor(vp.width);
-  canvas.height = Math.floor(vp.height);
-  await page.render({ canvasContext: canvas.getContext("2d"), viewport: vp }).promise;
-  // Texto
-  const tc = await page.getTextContent();
-  let lines = [], line = "";
-  tc.items.forEach((it) => {
-    line += it.str + " ";
-    if (it.hasEOL) { lines.push(line); line = ""; }
-  });
-  if (line.trim()) lines.push(line);
-  pageSentences = splitSentences(lines.join("\n"));
+  if (doc.fmt === "pdf" && pdfDoc) {
+    wrap.classList.remove("hidden");
+    const page = await pdfDoc.getPage(n + 1);
+    const targetW = wrap.clientWidth || window.innerWidth - 24;
+    const baseVp = page.getViewport({ scale: 1 });
+    const scale = (targetW / baseVp.width) * Math.min(window.devicePixelRatio || 1, 2);
+    const vp = page.getViewport({ scale });
+    const canvas = $("page-canvas");
+    canvas.width = Math.floor(vp.width);
+    canvas.height = Math.floor(vp.height);
+    await page.render({ canvasContext: canvas.getContext("2d"), viewport: vp }).promise;
+  } else {
+    wrap.classList.add("hidden");
+  }
+
+  sectionSentences = splitSentences(doc.sections[n].text);
+  allWords = []; sentWordStart = []; sentWordCount = [];
   const box = $("sentences");
   box.innerHTML = "";
-  $("no-text").classList.toggle("hidden", pageSentences.length > 0);
-  pageSentences.forEach((s, i) => {
+  $("no-text").classList.toggle("hidden", sectionSentences.length > 0);
+  // Índice de palabras calculado de una vez: es lo que usan luego los trozos
+  // para saber qué palabras les tocan.
+  const wmap = wordIndexMap(sectionSentences);
+  sentWordStart = wmap.start;
+  sentWordCount = wmap.count;
+  sectionSentences.forEach((s, i) => {
     const d = document.createElement("div");
     d.className = "sentence";
     d.dataset.i = i;
-    d.textContent = s;
+    // Cada palabra en su propio <span>: es lo que permite resaltarla sola.
+    for (const p of String(s).split(/(\s+)/)) {
+      if (!p) continue;
+      if (!/\S/.test(p)) { d.appendChild(document.createTextNode(p)); continue; }
+      const w = document.createElement("span");
+      w.className = "w";
+      w.textContent = p;
+      d.appendChild(w);
+      allWords.push(w);
+    }
     d.addEventListener("click", () => startReading(i));
     box.appendChild(d);
   });
   $("reader-scroll").scrollTop = 0;
 }
-$("btn-prev").addEventListener("click", () => { if (curPage > 1) renderPage(curPage - 1); });
-$("btn-next").addEventListener("click", () => { if (curPage < numPages) renderPage(curPage + 1); });
-$("page-slider").addEventListener("change", (ev) => renderPage(parseInt(ev.target.value, 10) || 1));
+$("btn-prev").addEventListener("click", () => { if (curSection > 0) renderSection(curSection - 1); });
+$("btn-next").addEventListener("click", () => { if (doc && curSection < doc.sections.length - 1) renderSection(curSection + 1); });
+$("page-slider").addEventListener("change", (ev) => renderSection((parseInt(ev.target.value, 10) || 1) - 1));
 
 /* ================= Ajustes ================= */
 $("btn-settings").addEventListener("click", () => {
@@ -616,6 +749,7 @@ $("btn-reload-voices").addEventListener("click", () => ensureVoicesLoaded(true))
 $("rate-slider").addEventListener("input", (ev) => {
   settings.rate = parseFloat(ev.target.value);
   $("rate-val").textContent = settings.rate.toFixed(1) + "×";
+  calFactor = 1; // la calibración es por velocidad: al cambiarla, a cero
   saveSettings();
 });
 $("continue-next").addEventListener("change", (ev) => {
