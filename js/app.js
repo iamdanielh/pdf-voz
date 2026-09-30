@@ -681,6 +681,10 @@ async function openDoc(id) {
     }
     doc = d;
     docId = id; docName = d.name; curSection = 0;
+    // Cada libro empieza con su imagen de página oculta, si tiene texto. Si no,
+    // quien dejó el botón pulsado en un libro se encontraría con la imagen
+    // duplicando el texto en el siguiente, sin haberlo pedido.
+    showPageImage = false;
     // Volver donde lo dejó la última vez, no al principio del libro.
     lastRead = (d.lastRead && typeof d.lastRead.section === "number") ? d.lastRead : { section: 0, sentence: 0 };
     restorePending = lastRead.sentence || 0;
@@ -789,14 +793,23 @@ async function renderSection(n, restore = 0) {
   const toggle = $("page-toggle");
   const isPdf = doc.fmt === "pdf" && pdfDoc;
   if (isPdf) {
-    toggle.hidden = false;
-    if (!hasText || showPageImage) {
+    if (!hasText) {
+      // Página escaneada: la imagen es todo lo que hay, así que no hay nada
+      // que mostrar ni ocultar. El botón sería un adorno que no hace nada.
       wrap.hidden = false;
       await drawPage(n);
-      toggle.textContent = hasText ? "Ocultar imagen de la página" : "Imagen de la página";
+      toggle.hidden = true;
     } else {
-      wrap.hidden = true;
-      toggle.textContent = "Ver la página tal cual";
+      // Con texto, la imagen solo aparece si la pides a mano.
+      toggle.hidden = false;
+      if (showPageImage) {
+        wrap.hidden = false;
+        await drawPage(n);
+        toggle.textContent = "Ocultar imagen de la página";
+      } else {
+        wrap.hidden = true;
+        toggle.textContent = "Ver la página tal cual";
+      }
     }
   } else {
     wrap.hidden = true;
