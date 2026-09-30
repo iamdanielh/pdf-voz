@@ -86,7 +86,9 @@ body {
 /* ---------- reader ---------- */
 .reader-bar .icon-btn {
   border: none; background: var(--accent-soft); color: var(--accent);
-  width: 40px; height: 40px; border-radius: 12px; font-size: 22px; cursor: pointer; flex-shrink: 0;
+  /* 44px: es el mínimo que comfortably se toca con el dedo (iOS HIG), y esta
+     app se usa sobre todo con los dedos y sin mirar. */
+  width: 44px; height: 44px; border-radius: 12px; font-size: 22px; cursor: pointer; flex-shrink: 0;
 }
 .reader-title { flex: 1; min-width: 0; }
 .reader-title h2 { margin: 0; font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
