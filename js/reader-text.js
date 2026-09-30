@@ -38,3 +38,29 @@ export function chunkSentences(sentences, startIdx = 0, maxLen = 170) {
   if (cur.text) chunks.push(cur);
   return chunks;
 }
+
+// Separa párrafos por las líneas en blanco. Un libro se lee por párrafos: si
+// cada frase va en su propia caja, el texto sale troceado y deja de leerse
+// como algo continuo. Los importadores dejan los párrafos marcados así.
+export function splitParagraphs(text) {
+  return String(text || "")
+    .split(/\n[ \t]*\n+/)
+    .map((p) => p.replace(/[ \t]*\n[ \t]*/g, " ").replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+}
+
+// Une las dos cosas: párrafos con sus frases dentro, y las frases todas en una
+// lista global. El motor de lectura sigue trabajando con índices de frase; los
+// párrafos son solo la forma de mostrarlo en pantalla.
+export function buildReading(text) {
+  const paras = [];
+  const sentences = [];
+  for (const p of splitParagraphs(text)) {
+    const ss = splitSentences(p);
+    if (!ss.length) continue;
+    const start = sentences.length;
+    for (const s of ss) sentences.push(s);
+    paras.push({ text: p, start, end: sentences.length, sentences: ss });
+  }
+  return { paras, sentences };
+}

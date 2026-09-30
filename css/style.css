@@ -7,8 +7,16 @@
   --accent-soft: #dbeafe;
   --line: #e5e7eb;
   --danger: #dc2626;
-  --word: #fde047;
+  --word: #facc15;
   --word-ink: #141824;
+  --word-line: #92400e;
+  /* Tintes de la columna de lectura: muy tenues, para marcar sin cortar el
+     texto en trozos como si fueran tarjetas. */
+  --para-hi: rgba(29, 78, 216, .07);
+  --sent-hi: rgba(29, 78, 216, .10);
+  --tap: rgba(29, 78, 216, .14);
+  --read-size: 19px;
+  --read-font: ui-serif, "New York", Georgia, "Times New Roman", serif;
   --radius: 16px;
 }
 @media (prefers-color-scheme: dark) {
@@ -22,6 +30,10 @@
     --line: #2b3650;
     --word: #facc15;
     --word-ink: #0f1420;
+    --word-line: #fde68a;
+    --para-hi: rgba(96, 165, 250, .10);
+    --sent-hi: rgba(96, 165, 250, .16);
+    --tap: rgba(96, 165, 250, .22);
   }
 }
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -36,6 +48,11 @@ body {
 #app { height: 100dvh; display: flex; flex-direction: column; }
 .view { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .hidden { display: none !important; }
+/* Solo para lectores de pantalla: invisible pero disponible para leer. */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; margin: -1px;
+  padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
 
 /* ---------- top bar ---------- */
 .topbar {
@@ -93,39 +110,72 @@ body {
 .reader-title { flex: 1; min-width: 0; }
 .reader-title h2 { margin: 0; font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .reader-title p { margin: 2px 0 0; font-size: 13px; color: var(--muted); }
-.reader-scroll { flex: 1; overflow-y: auto; padding: 12px 12px 0; -webkit-overflow-scrolling: touch; }
-.page-wrap {
-  background: #fff; border-radius: 12px; overflow: hidden;
-  box-shadow: 0 2px 12px rgba(0,0,0,.12); margin-bottom: 12px;
+/* ---------- lector: una columna de texto, como un libro ---------- */
+.reader-scroll {
+  flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  padding: 0 20px;
+  scroll-behavior: smooth;
 }
+/* La imagen de la página solo aparece cuando de verdad aporta: si la página ya
+   tiene texto, repetirlo debajo del texto es ruido. En páginas escaneadas es
+   lo único que hay, así que ahí se queda. */
+.page-wrap {
+  max-width: 720px; margin: 18px auto 0;
+  background: #fff; border-radius: 10px; overflow: hidden;
+  box-shadow: 0 2px 14px rgba(0,0,0,.14);
+}
+.page-wrap[hidden] { display: none !important; }
 .page-wrap canvas { display: block; width: 100%; height: auto; }
+.page-toggle {
+  display: block; margin: 12px auto 0; padding: 9px 16px; min-height: 44px;
+  font-size: 13.5px; color: var(--muted);
+  background: none; border: 1px solid var(--line);
+  border-radius: 999px; cursor: pointer;
+}
 .no-text {
   background: var(--accent-soft); color: var(--ink);
-  border-radius: 12px; padding: 14px; font-size: 15px; margin-bottom: 12px; line-height: 1.5;
+  max-width: 34em; margin: 18px auto 0;
+  border-radius: 12px; padding: 14px; font-size: 15px; line-height: 1.5;
 }
-.sentences { display: flex; flex-direction: column; gap: 8px; }
-.sentence {
-  background: var(--card); border: 1px solid var(--line);
-  border-radius: 12px; padding: 12px 14px;
-  font-size: 16.5px; line-height: 1.55; cursor: pointer;
-  transition: background .2s, border-color .2s;
+
+/* El texto se lee seguido, en una sola columna y con una medida cómoda.
+   Nada de una caja por frase: eso se leía como una lista de subtítulos.
+   El padding lateral es lo que absorbe el margen negativo de los párrafos,
+   para que el tinte de lectura no se salga de la columna. */
+.reading {
+  max-width: 34em; margin: 0 auto; padding: 26px 8px 8px;
+  font-family: var(--read-font);
+  font-size: var(--read-size);
+  line-height: 1.75;
+  color: var(--ink);
+  -webkit-text-size-adjust: 100%;
+  overflow-wrap: break-word;
 }
-.sentence:active { background: var(--accent-soft); }
-.sentence.speaking {
-  background: var(--accent-soft);
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent);
+.para {
+  margin: 0 -8px 1.1em; padding: 3px 8px;
+  border-radius: 8px; cursor: pointer;
+  transition: background .25s;
+  scroll-margin: 100px 0 130px;   /* el título y los botones no tapan la frase */
 }
-/* Palabra que se está leyendo ahora mismo. El amarillón contrasta con el azul
-   de la frase y con el texto, así que se distingue de un vistazo sin depender
-   del color. */
-.sentence .w { border-radius: 4px; }
-.sentence .w.karaoke {
+.para:first-child { margin-top: 0; }
+.para.speaking { background: var(--para-hi); }
+.para:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.para.pressed { background: var(--tap); }   /* al tocarla, antes de leer */
+.sent { border-radius: 4px; transition: background .2s; }
+.sent.speaking { background: var(--sent-hi); }
+
+/* La palabra que se está leyendo. Sin transición a propósito: si la hubiera,
+   el color iría siempre un poco por detrás de la voz.
+   El borde oscuro es lo que la hace verse en modo claro: un amarillo sobre
+   una página blanca se parece mucho al papel, y con el marco sí se distingue
+   de un vistazo, como cuando subrayas con un rotulador. */
+.w { border-radius: 3px; }
+.w.karaoke {
   background: var(--word);
   color: var(--word-ink);
-  box-shadow: 0 0 0 2px var(--word);
+  box-shadow: 0 0 0 2px var(--word-line);
 }
-.reader-bottom-space { height: 12px; }
+.reader-bottom-space { height: 28px; }
 
 /* ---------- transport ---------- */
 .transport {

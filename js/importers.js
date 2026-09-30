@@ -192,19 +192,47 @@ function opfTitle(xml) {
 
 // pdfjsLib se recibe desde app.js para no cargarlo dos veces ni tocar dos veces
 // el worker: aquí solo se extrae el texto por página.
+// Agrupa los fragmentos de texto de una página en líneas y decide dónde hay
+// salto de párrafo. pdf.js no dice "aquí acaba un párrafo", solo da líneas con
+// su posición, así que se deduce del hueco vertical: un hueco claramente mayor
+// que el normal es un párrafo nuevo. Sin esto, una página entera saldría como
+// un solo bloque larguísimo y no se leería como un libro.
+function itemsToText(items) {
+  const lines = [];
+  let cur = null;
+  for (const it of items) {
+    if (!cur) cur = { text: "", y: it.transform ? it.transform[5] : 0 };
+    cur.text += (cur.text ? " " : "") + it.str;
+    if (it.hasEOL) { lines.push(cur); cur = null; }
+  }
+  if (cur && cur.text.trim()) lines.push(cur);
+  if (!lines.length) return "";
+  // Hueco vertical típico entre líneas consecutivas.
+  const gaps = [];
+  for (let i = 1; i < lines.length; i++) gaps.push(Math.abs(lines[i - 1].y - lines[i].y));
+  const sorted = gaps.slice().sort((a, b) => a - b);
+  const typical = sorted.length ? sorted[Math.floor(sorted.length / 2)] : 0;
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (i > 0) {
+      const gap = Math.abs(lines[i - 1].y - lines[i].y);
+      // Hueco grande = párrafo nuevo; también corta si cambia bruscamente de
+      // columna, para no pegar el final de una con el principio de otra.
+      if (typical > 0 && gap > typical * 1.55) out.push("");
+    }
+    out.push(lines[i].text);
+  }
+  return out.join("\n");
+}
+
 export async function importPdf(pdfjsLib, buf) {
   const pdf = await pdfjsLib.getDocument({ data: buf.slice(0) }).promise;
   const sections = [];
   for (let n = 1; n <= pdf.numPages; n++) {
     const page = await pdf.getPage(n);
     const tc = await page.getTextContent();
-    let lines = [], line = "";
-    tc.items.forEach((it) => {
-      line += it.str + " ";
-      if (it.hasEOL) { lines.push(line); line = ""; }
-    });
-    if (line.trim()) lines.push(line);
-    sections.push({ label: `Página ${n}`, text: tidy(lines.join("\n")) });
+    const text = tidy(itemsToText(tc.items));
+    sections.push({ label: `Página ${n}`, text });
     page.cleanup();
   }
   try { await pdf.destroy(); } catch (e) {}

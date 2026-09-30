@@ -1,7 +1,7 @@
 // VozPDF — lector de PDF, EPUB, DOCX y texto con voz en español. PWA, sin internet.
 import * as pdfjsLib from "./vendor/pdf.min.mjs";
 import { importFile, fmtLabel } from "./importers.js";
-import { splitSentences, chunkSentences } from "./reader-text.js";
+import { chunkSentences, buildReading } from "./reader-text.js";
 import { cumulative, wordAt, estimateMs, calibrate, wordMs, wordIndexMap } from "./karaoke.js";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("./vendor/pdf.worker.min.mjs", import.meta.url).toString();
@@ -37,11 +37,19 @@ const dbPutPdf = (doc) => dbOp("readwrite", (s) => s.put(doc));
 
 /* ================= Ajustes ================= */
 const settings = Object.assign(
-  { voiceURI: "", voiceManual: false, rate: 1, continueNext: true },
+  { voiceURI: "", voiceManual: false, rate: 1, continueNext: true, readSize: 19 },
   JSON.parse(localStorage.getItem("vozpdf-settings") || "{}")
 );
 function saveSettings() {
   localStorage.setItem("vozpdf-settings", JSON.stringify(settings));
+}
+// El tamaño de letra se guarda en una variable de CSS: así el texto se
+// agranda de verdad, en una sola pasada y sin tocar los estilos de cada parte.
+function applyReadSize() {
+  const px = Math.min(30, Math.max(15, Number(settings.readSize) || 19));
+  document.documentElement.style.setProperty("--read-size", px + "px");
+  const out = $("size-val");
+  if (out) out.textContent = px + "px";
 }
 
 /* ================= Unidades de lectura ================= */
@@ -274,17 +282,39 @@ function ensureVoicesLoaded(force) {
 }
 
 function clearHighlight() {
-  document.querySelectorAll(".sentence.speaking").forEach((el) => el.classList.remove("speaking"));
+  for (const el of sentEls) if (el) el.classList.remove("speaking");
+  for (const el of paraEls) if (el) el.classList.remove("speaking");
 }
+// Marca las frases del trozo y el párrafo donde están. El párrafo se tiñe para
+// saber de un vistazo dónde estás, y la frase para no perder el hilo en un
+// párrafo largo.
 function highlightChunk(chunk) {
   clearHighlight();
   if (!chunk) return;
   let first = null;
-  chunk.idx.forEach((i) => {
-    const el = document.querySelector(`.sentence[data-i="${i}"]`);
-    if (el) { el.classList.add("speaking"); if (!first) first = el; }
-  });
-  if (first) first.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  const spoken = new Set();
+  for (const i of chunk.idx) {
+    const el = sentEls[i];
+    if (!el) continue;
+    el.classList.add("speaking");
+    spoken.add(el.parentElement);
+    if (!first) first = el;
+  }
+  for (const p of spoken) p.classList.add("speaking");
+  if (first) {
+    const p = first.closest(".para");
+    // "center" deja la frase a media pantalla: así el ojo no corre y el texto
+    // no queda debajo de los botones de abajo.
+    (p || first).scrollIntoView({ block: "center", behavior: "smooth" });
+    // Se anuncia la frase entera, no cada palabra: si no, el lector de pantalla
+    // recitaría un flujo imposible de seguir.
+    announce(first.textContent);
+  }
+}
+let liveRegion = null;
+function announce(text) {
+  if (!liveRegion) liveRegion = $("live-region");
+  if (liveRegion && text) liveRegion.textContent = text;
 }
 function setStatus(t) { $("read-status").textContent = t; }
 function setPlayIcon(playing) { $("btn-play").textContent = playing ? "⏸" : "▶"; }
@@ -376,6 +406,7 @@ function speakChunk() {
   stopWebAudio(); // por si el perro guardián re-dispara un trozo atascado
   const g = tts.gen;
   highlightChunk(chunk);
+  savePosition(curSection, chunk.idx[0]);
   setStatus(`Leyendo… (${tts.pos + 1}/${tts.chunks.length})`);
   tts.lastActivity = Date.now();
   const advance = () => {
@@ -501,7 +532,7 @@ function finishReading() {
   // Al terminar la sección, seguir con la siguiente si está activado.
   if (doc && settings.continueNext && curSection < doc.sections.length - 1) {
     setStatus(`Pasando a la ${unitWord(doc.fmt)} siguiente…`);
-    renderSection(curSection + 1).then(() => startReading(0)).catch(() => {
+    goToSection(curSection + 1).then(() => startReading(0)).catch(() => {
       releaseWakeLock();
       stopKeepalive();
       setStatus(`Toca ▶ para escuchar esta ${unitWord(doc.fmt)}`);
@@ -594,10 +625,27 @@ let docId = null;
 let docName = "";
 let doc = null;           // { fmt, sections: [{ label, text }], data? }
 let curSection = 0;
-let sectionSentences = [];  // frases de la sección actual
+let sectionSentences = [];  // frases de la sección actual, en orden
 let allWords = [];          // <span class="w"> de la sección actual
 let sentWordStart = [];     // frase i -> primer índice en allWords
 let sentWordCount = [];     // frase i -> cuántas palabras tiene
+let sentEls = [];           // frase i -> <span class="sent">
+let paraEls = [];           // párrafo i -> <p class="para">
+let lastRead = { section: 0, sentence: 0 };  // dónde lo dejamos, para volver
+let restorePending = 0;
+let saveTimer = null;
+// Guardar la posición en el mismo registro del documento, para no tener que
+// llevar una lista aparte. Se aplaza un poco: al avanzar por las frases se
+// llama muchas veces seguidas y no hace falta escribir en disco cada vez.
+function savePosition(section, sentence) {
+  lastRead = { section, sentence };
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(async () => {
+    if (!doc || doc.id == null) return;
+    doc.lastRead = lastRead;
+    try { await dbPutPdf(doc); } catch (e) {}
+  }, 800);
+}
 
 function showView(name) {
   $("view-library").classList.toggle("hidden", name !== "library");
@@ -633,10 +681,17 @@ async function openDoc(id) {
     }
     doc = d;
     docId = id; docName = d.name; curSection = 0;
+    // Volver donde lo dejó la última vez, no al principio del libro.
+    lastRead = (d.lastRead && typeof d.lastRead.section === "number") ? d.lastRead : { section: 0, sentence: 0 };
+    restorePending = lastRead.sentence || 0;
     $("doc-title").textContent = docName;
     $("page-slider").max = d.sections.length;
     showView("reader");
-    await renderSection(0);
+    await renderSection(lastRead.section || 0, restorePending);
+    if (lastRead.section) {
+      const u = unitWord(doc.fmt);
+      setStatus(`Continuando donde lo dejaste — toca ▶ para escuchar esta ${u}`);
+    }
   } catch (e) {
     alert("No se pudo abrir el documento.");
     showView("library");
@@ -656,7 +711,7 @@ $("btn-back").addEventListener("click", async () => {
   renderLibrary();
 });
 
-async function renderSection(n) {
+async function renderSection(n, restore = 0) {
   if (!doc || !doc.sections.length) return;
   n = Math.max(0, Math.min(doc.sections.length - 1, n));
   curSection = n;
@@ -671,67 +726,173 @@ async function renderSection(n) {
   $("page-indicator").textContent =
     `${u[0].toUpperCase() + u.slice(1)} ${n + 1} de ${doc.sections.length}`;
   $("page-slider").value = n + 1;
+  $("page-slider").setAttribute("aria-valuetext", $("page-indicator").textContent);
 
-  // Lienzo: solo tiene sentido en PDF. EPUB/DOCX/TXT se leen en la lista.
-  const wrap = $("page-wrap");
-  if (doc.fmt === "pdf" && pdfDoc) {
-    wrap.classList.remove("hidden");
-    const page = await pdfDoc.getPage(n + 1);
-    const targetW = wrap.clientWidth || window.innerWidth - 24;
-    const baseVp = page.getViewport({ scale: 1 });
-    const scale = (targetW / baseVp.width) * Math.min(window.devicePixelRatio || 1, 2);
-    const vp = page.getViewport({ scale });
-    const canvas = $("page-canvas");
-    canvas.width = Math.floor(vp.width);
-    canvas.height = Math.floor(vp.height);
-    await page.render({ canvasContext: canvas.getContext("2d"), viewport: vp }).promise;
-  } else {
-    wrap.classList.add("hidden");
-  }
-
-  sectionSentences = splitSentences(doc.sections[n].text);
+  const text = doc.sections[n].text;
+  const reading = buildReading(text);
+  sectionSentences = reading.sentences;
   allWords = []; sentWordStart = []; sentWordCount = [];
+  sentEls = []; paraEls = [];
   const box = $("sentences");
   box.innerHTML = "";
   $("no-text").classList.toggle("hidden", sectionSentences.length > 0);
-  // Índice de palabras calculado de una vez: es lo que usan luego los trozos
-  // para saber qué palabras les tocan.
+
+  // Se pinta por párrafos, no por frases: el texto queda seguido, como en un
+  // libro, en vez de una caja por frase.
   const wmap = wordIndexMap(sectionSentences);
   sentWordStart = wmap.start;
   sentWordCount = wmap.count;
-  sectionSentences.forEach((s, i) => {
-    const d = document.createElement("div");
-    d.className = "sentence";
-    d.dataset.i = i;
-    // Cada palabra en su propio <span>: es lo que permite resaltarla sola.
-    for (const p of String(s).split(/(\s+)/)) {
-      if (!p) continue;
-      if (!/\S/.test(p)) { d.appendChild(document.createTextNode(p)); continue; }
-      const w = document.createElement("span");
-      w.className = "w";
-      w.textContent = p;
-      d.appendChild(w);
-      allWords.push(w);
-    }
-    d.addEventListener("click", () => startReading(i));
-    box.appendChild(d);
+  let wi = 0;
+  reading.paras.forEach((para, pi) => {
+    const pe = document.createElement("p");
+    pe.className = "para";
+    // El párrafo es pulsable para empezar a leer por ahí. role + tabindex
+    // hacen que un lector de pantalla también lo pueda activar, no solo un dedo.
+    pe.setAttribute("role", "button");
+    pe.tabIndex = 0;
+    pe.setAttribute("aria-label",
+      `Leer desde aquí: ${para.text.slice(0, 60)}${para.text.length > 60 ? "…" : ""}`);
+    para.sentences.forEach((s, k) => {
+      const i = para.start + k;
+      const se = document.createElement("span");
+      se.className = "sent";
+      for (const part of String(s).split(/(\s+)/)) {
+        if (!part) continue;
+        if (!/\S/.test(part)) { se.appendChild(document.createTextNode(part)); continue; }
+        const w = document.createElement("span");
+        w.className = "w";
+        w.textContent = part;
+        se.appendChild(w);
+        allWords.push(w);
+        wi++;
+      }
+      sentEls[i] = se;
+      pe.appendChild(se);
+      pe.appendChild(document.createTextNode(" "));
+    });
+    paraEls[pi] = pe;
+    const go = () => { pe.classList.add("pressed");
+      setTimeout(() => pe.classList.remove("pressed"), 220);
+      startReading(para.start); };
+    pe.addEventListener("click", go);
+    pe.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); go(); }
+    });
+    box.appendChild(pe);
   });
-  $("reader-scroll").scrollTop = 0;
+
+  // Imagen de la página: solo si la página no tiene texto (entonces es lo único
+  // que hay) o si el usuario la pide a mano. Si ya hay texto, repetirlo en
+  // imagen solo estorba.
+  const wrap = $("page-wrap");
+  const hasText = sectionSentences.length > 0;
+  const toggle = $("page-toggle");
+  const isPdf = doc.fmt === "pdf" && pdfDoc;
+  if (isPdf) {
+    toggle.hidden = false;
+    if (!hasText || showPageImage) {
+      wrap.hidden = false;
+      await drawPage(n);
+      toggle.textContent = hasText ? "Ocultar imagen de la página" : "Imagen de la página";
+    } else {
+      wrap.hidden = true;
+      toggle.textContent = "Ver la página tal cual";
+    }
+  } else {
+    wrap.hidden = true;
+    toggle.hidden = true;
+  }
+
+  if (restore > 0 && paraEls.length) {
+    // Volver donde lo dejamos: al párrafo que contenía la frase `restore`.
+    let target = null;
+    for (let i = 0; i < paraEls.length; i++) {
+      const p = reading.paras[i];
+      if (p && restore >= p.start && restore < p.end) { target = paraEls[i]; break; }
+    }
+    if (!target && paraEls[0]) target = paraEls[0];
+    if (target) {
+      target.scrollIntoView({ block: "start" });
+      target.classList.add("speaking");
+    }
+  } else {
+    $("reader-scroll").scrollTop = 0;
+    // Llegar a una sección a mano también cuenta como "aquí lo dejé": si
+    // alguien va a la página 5 y cierra el libro, debe volver a la 5 y no
+    // a la última frase que sonó.
+    savePosition(n, 0);
+  }
 }
-$("btn-prev").addEventListener("click", () => { if (curSection > 0) renderSection(curSection - 1); });
-$("btn-next").addEventListener("click", () => { if (doc && curSection < doc.sections.length - 1) renderSection(curSection + 1); });
-$("page-slider").addEventListener("change", (ev) => renderSection((parseInt(ev.target.value, 10) || 1) - 1));
+let showPageImage = false;
+async function drawPage(n) {
+  const wrap = $("page-wrap");
+  const page = await pdfDoc.getPage(n + 1);
+  const targetW = wrap.clientWidth || window.innerWidth - 40;
+  const baseVp = page.getViewport({ scale: 1 });
+  const scale = (targetW / baseVp.width) * Math.min(window.devicePixelRatio || 1, 2);
+  const vp = page.getViewport({ scale });
+  const canvas = $("page-canvas");
+  canvas.width = Math.floor(vp.width);
+  canvas.height = Math.floor(vp.height);
+  await page.render({ canvasContext: canvas.getContext("2d"), viewport: vp }).promise;
+  page.cleanup();
+}
+$("page-toggle").addEventListener("click", async () => {
+  showPageImage = $("page-wrap").hidden;
+  await renderSection(curSection, restorePending);
+});
+// Al cambiar de sección a mano se empieza por su principio: `restorePending`
+// era para reabrir el documento, no para saltar de una sección a otra.
+function goToSection(n) {
+  restorePending = 0;
+  return renderSection(n);
+}
+$("btn-prev").addEventListener("click", () => { if (curSection > 0) goToSection(curSection - 1); });
+$("btn-next").addEventListener("click", () => { if (doc && curSection < doc.sections.length - 1) goToSection(curSection + 1); });
+$("page-slider").addEventListener("change", (ev) => goToSection((parseInt(ev.target.value, 10) || 1) - 1));
 
 /* ================= Ajustes ================= */
-$("btn-settings").addEventListener("click", () => {
+let sheetReturnFocus = null;
+function openSettings() {
   ensureVoicesLoaded(true);
   $("rate-slider").value = settings.rate;
   $("rate-val").textContent = Number(settings.rate).toFixed(1) + "×";
+  $("size-slider").value = settings.readSize;
+  $("size-val").textContent = (settings.readSize || 19) + "px";
   $("continue-next").checked = settings.continueNext;
-  $("settings-sheet").classList.remove("hidden");
-});
-$("btn-close-settings").addEventListener("click", () => {
+  const sheet = $("settings-sheet");
+  sheet.classList.remove("hidden");
+  // Guardamos dónde estaba el foco para devolverlo al cerrar. Si no era un
+  // control (por ejemplo, se abrió con un toque y el foco seguía en el
+  // documento), usamos el propio botón de ajustes: si no, el foco se perdía.
+  sheetReturnFocus = document.activeElement;
+  const first = sheet.querySelector("select, input, button");
+  if (first) first.focus();
+}
+function closeSettings() {
   $("settings-sheet").classList.add("hidden");
+  const back = sheetReturnFocus;
+  if (back && back.focus && back !== document.body) back.focus();
+  else $("btn-settings").focus();
+  sheetReturnFocus = null;
+}
+$("btn-settings").addEventListener("click", openSettings);
+$("btn-close-settings").addEventListener("click", closeSettings);
+// Escape cierra los ajustes y Tab queda atrapado dentro mientras están abiertos.
+$("settings-sheet").addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape") { ev.preventDefault(); closeSettings(); return; }
+  if (ev.key !== "Tab") return;
+  const f = Array.from($("settings-sheet").querySelectorAll(
+    "select, input, button, [tabindex]:not([tabindex='-1'])"))
+    .filter((el) => el.offsetParent !== null && !el.disabled);
+  if (!f.length) return;
+  const first = f[0], last = f[f.length - 1];
+  if (ev.shiftKey && document.activeElement === first) { ev.preventDefault(); last.focus(); }
+  else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first.focus(); }
+});
+// Tocar fuera del panel también lo cierra.
+$("settings-sheet").addEventListener("click", (ev) => {
+  if (ev.target === $("settings-sheet")) closeSettings();
 });
 $("voice-select").addEventListener("change", (ev) => {
   if (ev.target.value === AUTO_VOICE) {
@@ -752,6 +913,11 @@ $("rate-slider").addEventListener("input", (ev) => {
   calFactor = 1; // la calibración es por velocidad: al cambiarla, a cero
   saveSettings();
 });
+$("size-slider").addEventListener("input", (ev) => {
+  settings.readSize = parseInt(ev.target.value, 10);
+  applyReadSize();
+  saveSettings();
+});
 $("continue-next").addEventListener("change", (ev) => {
   settings.continueNext = ev.target.checked;
   saveSettings();
@@ -759,6 +925,7 @@ $("continue-next").addEventListener("change", (ev) => {
 /* ================= Arranque ================= */
 (async function init() {
   ensureVoicesLoaded();
+  applyReadSize();
   await renderLibrary();
   if ("serviceWorker" in navigator) {
     try { await navigator.serviceWorker.register("sw.js"); } catch (e) {}
